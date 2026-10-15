@@ -527,11 +527,12 @@ export const maps: readonly MapInfo[] = [
     type: GameMapType.BrainRot,
     translationKey: "map.brainrot",
     categories: ["arcade"],
-    multiplayerFrequency: 10,
+    multiplayerFrequency: 50,
     ffaFrequency: -1,
     teamFrequency: -1,
     specialFrequency: -1,
     defaultNationCount: 43,
+    themes: ["space", "war"],
     layers: [{ id: "brland", placement: "land", nukeable: true }],
   },
   {
@@ -2055,6 +2056,7 @@ export const maps: readonly MapInfo[] = [
     teamFrequency: -1,
     specialFrequency: -1,
     defaultNationCount: 34,
+    themes: ["scary", "fantasy"],
     layers: [
       { id: "eyeland", placement: "land", nukeable: true },
       { id: "eyewater", placement: "water" },
