@@ -17,6 +17,11 @@ import {
   resolveCosmetics,
   type ResolvedCosmetic,
 } from "../../src/client/Cosmetics";
+import {
+  COSMETICS_CHANGED,
+  publishExperimentsForTest,
+  resetExperimentsForTest,
+} from "../../src/client/Experiments";
 import { initNavigation } from "../../src/client/Navigation";
 import { saleCoversEverything, type StoreModal } from "../../src/client/Store";
 import type { StoreTracker } from "../../src/client/StoreTracking";
@@ -615,6 +620,41 @@ describe("StoreModal cosmetic browser", () => {
     }
   });
 
+  it("still refetches when the store redraws after a sale ends, before its timer runs", async () => {
+    const running = {
+      patterns: {},
+      flags: {},
+      promotions: [
+        {
+          id: "1",
+          name: "Flash",
+          percentOff: 10,
+          endsAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    } as unknown as Cosmetics;
+    vi.mocked(fetchCosmetics).mockResolvedValue(running);
+    const modal = await openStoreOnCosmetic("patterns");
+    vi.useFakeTimers({ now: Date.now() });
+    try {
+      // Arms the sale-end timer on the fake clock.
+      modal.requestUpdate();
+      await modal.updateComplete;
+      vi.setSystemTime(Date.now() + 61_000);
+      modal.requestUpdate();
+      await modal.updateComplete;
+      vi.mocked(fetchCosmetics).mockClear();
+      vi.mocked(fetchCosmetics).mockResolvedValue({
+        promotions: [],
+      } as unknown as Cosmetics);
+      // Not the old timeout's minute: at once.
+      vi.advanceTimersByTime(1);
+      expect(fetchCosmetics).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("refetches on reopen when the kept catalog still has an ended sale", async () => {
     const ended = {
       patterns: {},
@@ -820,6 +860,28 @@ describe("StoreModal cosmetic browser", () => {
       hero.querySelector<CosmeticCard>("cosmetic-card")!.resolved.key,
     ).toBe(zap.key);
     expect(hero.querySelector("sale-countdown")).toBeTruthy();
+    // One label for the one deadline, on the banner, the hero and the card:
+    // when this deal ends, not when the next item starts.
+    for (const el of [
+      modal.querySelector("[data-store-flash-banner]")!,
+      hero,
+      hero.querySelector("[data-cosmetic-flash-timer]")!,
+    ]) {
+      expect(el.textContent).toContain("store.flash_ends_in");
+    }
+    expect(modal.textContent).not.toContain("store.flash_next_in");
+    expect(modal.textContent).not.toContain("store.flash_left");
+    // The price and the way to pay sit in the hero, beside the offer, at
+    // full size; the hero's card carries no second buy button.
+    const heroBuy = hero.querySelector<PurchaseButton>(
+      "[data-store-flash-buy] purchase-button",
+    )!;
+    expect(heroBuy).toBeTruthy();
+    expect(heroBuy.priceHard).toBe(
+      (zap.cosmetic as { priceHard: number }).priceHard,
+    );
+    expect(hero.querySelector("cosmetic-card purchase-button")).toBeNull();
+    expect(hero.querySelectorAll("purchase-button")).toHaveLength(1);
     // The flash item leads in the hero, not again in the grid below it.
     const gridKeys = [
       ...modal.querySelectorAll<CosmeticCard>(
@@ -879,6 +941,334 @@ describe("StoreModal cosmetic browser", () => {
     expect(modal.querySelector('[data-store-subtab="patterns"]')).toBeTruthy();
   });
 
+  describe("New tab", () => {
+    const soon = () => new Date(Date.now() + 3 * 86_400_000).toISOString();
+    const later = () => new Date(Date.now() + 10 * 86_400_000).toISOString();
+    const withNew = (
+      resolved: ResolvedCosmetic,
+      newUntil: string,
+      key = resolved.key,
+    ): ResolvedCosmetic => ({
+      ...resolved,
+      cosmetic: { ...(resolved.cosmetic as object), newUntil } as never,
+      key,
+    });
+    const keys = (modal: StoreModal) =>
+      [...modal.querySelectorAll<CosmeticCard>("cosmetic-card")].map(
+        (c) => c.resolved.key,
+      );
+
+    it("lists new cosmetics, effects and bundles, newest first", async () => {
+      const newFlag = withNew(flag, soon());
+      const newTrail = withNew(trail("comet"), later());
+      const newBundle = withNew(starterBundle, soon());
+      resolvedCatalog = [red, blue, newFlag, newTrail, newBundle];
+      const modal = await openStoreOnCosmetic("patterns");
+
+      const newTab = modal.querySelector<HTMLButtonElement>(
+        '[data-store-subtab="new"]',
+      )!;
+      expect(newTab.textContent).toContain("store.new_tab");
+      // New comes first in the sub-tab bar.
+      expect(
+        modal
+          .querySelector("[data-store-subtab]")!
+          .getAttribute("data-store-subtab"),
+      ).toBe("new");
+      newTab.click();
+      await modal.updateComplete;
+      expect(keys(modal)[0]).toBe(newTrail.key);
+      expect(new Set(keys(modal))).toEqual(
+        new Set([newTrail.key, newFlag.key, newBundle.key]),
+      );
+      expect(
+        (
+          modal as unknown as { placementFor(el: Element): unknown }
+        ).placementFor(product(modal, newFlag.key)!),
+      ).toEqual({
+        kind: "tab",
+        tab: "cosmetics",
+        subTab: "new",
+      });
+    });
+
+    it("hides the New tab when nothing is new", async () => {
+      resolvedCatalog = [
+        red,
+        withNew(flag, new Date(Date.now() - 1000).toISOString()),
+      ];
+      const modal = await openStoreOnCosmetic("patterns");
+      expect(modal.querySelector('[data-store-subtab="new"]')).toBeNull();
+    });
+
+    it("leaves out a new item the player already owns", async () => {
+      resolvedCatalog = [
+        { ...withNew(flag, soon()), relationship: "owned" },
+        withNew(red, soon(), "pattern:fresh:red"),
+      ];
+      const modal = await openStoreOnCosmetic("patterns");
+      modal
+        .querySelector<HTMLButtonElement>('[data-store-subtab="new"]')!
+        .click();
+      await modal.updateComplete;
+      expect(keys(modal)).toEqual(["pattern:fresh:red"]);
+    });
+
+    it("drops the badges, and the New tab, when the items stop being new", async () => {
+      const until = new Date(Date.now() + 60_000).toISOString();
+      const fresh = withNew(red, until, "pattern:fresh:red");
+      (fresh.cosmetic as { name: string }).name = "fresh";
+      resolvedCatalog = [red, fresh, withNew(flag, until)];
+      const modal = await openStoreOnCosmetic("patterns");
+      modal
+        .querySelector<HTMLButtonElement>('[data-store-subtab="new"]')!
+        .click();
+      await modal.updateComplete;
+      expect(new Set(keys(modal))).toEqual(new Set([flag.key, fresh.key]));
+      expect(modal.querySelectorAll("[data-cosmetic-new]")).toHaveLength(2);
+
+      vi.useFakeTimers({ now: Date.now() });
+      try {
+        // Drop the real timer; the redraw re-arms it on the fake clock.
+        (modal as unknown as { clearNewEnd(): void }).clearNewEnd();
+        modal.requestUpdate();
+        await modal.updateComplete;
+        vi.advanceTimersByTime(61_000);
+        await modal.updateComplete;
+        expect(modal.querySelector('[data-store-subtab="new"]')).toBeNull();
+        expect(keys(modal)).toEqual([red.key, fresh.key]);
+        await Promise.all(
+          [...modal.querySelectorAll<CosmeticCard>("cosmetic-card")].map(
+            (c) => c.updateComplete,
+          ),
+        );
+        expect(modal.querySelector("[data-cosmetic-new]")).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("opens straight on the New tab with sub=new", async () => {
+      const newFlag = withNew(flag, soon());
+      resolvedCatalog = [red, newFlag];
+      store = document.createElement("store-modal") as StoreModal;
+      store.inline = true;
+      document.body.appendChild(store);
+      await store.updateComplete;
+      store.open({ tab: "cosmetics", sub: "new" });
+      await vi.waitFor(() =>
+        expect(store!.querySelector("cosmetic-card")).toBeTruthy(),
+      );
+      expect(keys(store)).toEqual([newFlag.key]);
+    });
+
+    it("keeps sub=new while the catalog is still loading", async () => {
+      const newFlag = withNew(flag, soon());
+      resolvedCatalog = [red, newFlag];
+      // Like the real resolver: no catalog yet, nothing to list.
+      vi.mocked(resolveCosmetics).mockImplementation((cosmetics) =>
+        cosmetics === null ? [] : resolvedCatalog,
+      );
+      let deliver!: (catalog: Cosmetics) => void;
+      vi.mocked(fetchCosmetics).mockReturnValueOnce(
+        new Promise((resolve) => (deliver = resolve)),
+      );
+      store = document.createElement("store-modal") as StoreModal;
+      store.inline = true;
+      document.body.appendChild(store);
+      await store.updateComplete;
+      store.open({ tab: "cosmetics", sub: "new" });
+      await store.updateComplete;
+      deliver({} as Cosmetics);
+      await vi.waitFor(() =>
+        expect(store!.querySelector("cosmetic-card")).toBeTruthy(),
+      );
+      expect(keys(store)).toEqual([newFlag.key]);
+    });
+
+    it("shows a bundle's contents from the New tab", async () => {
+      const newBundle = withNew(starterBundle, soon());
+      resolvedCatalog = [red, newBundle];
+      const modal = await openStoreOnCosmetic("patterns");
+      modal
+        .querySelector<HTMLButtonElement>('[data-store-subtab="new"]')!
+        .click();
+      await modal.updateComplete;
+      card(modal, newBundle.key)!.onActivate!(newBundle);
+      await modal.updateComplete;
+      expect(modal.querySelector("pack-contents-dialog")).toBeTruthy();
+    });
+
+    /** Opens the New tab on one flag that stops being new in a minute. */
+    async function openNewTabExpiringSoon() {
+      const until = new Date(Date.now() + 60_000).toISOString();
+      resolvedCatalog = [red, withNew(flag, until)];
+      const modal = await openStoreOnCosmetic("patterns");
+      modal
+        .querySelector<HTMLButtonElement>('[data-store-subtab="new"]')!
+        .click();
+      await modal.updateComplete;
+      expect(keys(modal)).toEqual([flag.key]);
+      return modal;
+    }
+    const newEndTimer = (modal: StoreModal) =>
+      (modal as unknown as { newEndTimer: unknown }).newEndTimer;
+
+    it("drops expired items at once when the clock passes the deadline before the timer fires", async () => {
+      const modal = await openNewTabExpiringSoon();
+      vi.useFakeTimers({ now: Date.now() });
+      try {
+        // Arms the timer on the fake clock, a minute out.
+        modal.requestUpdate();
+        await modal.updateComplete;
+        // The clock jumps past the deadline; the timer is still a minute
+        // away when a redraw comes in.
+        vi.setSystemTime(Date.now() + 61_000);
+        modal.requestUpdate();
+        await modal.updateComplete;
+        vi.advanceTimersByTime(1);
+        await modal.updateComplete;
+        expect(modal.querySelector('[data-store-subtab="new"]')).toBeNull();
+        expect(keys(modal)).toEqual([red.key]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("drops expired items on a redraw with no timer armed", async () => {
+      const modal = await openNewTabExpiringSoon();
+      vi.useFakeTimers({ now: Date.now() });
+      try {
+        (modal as unknown as { clearNewEnd(): void }).clearNewEnd();
+        vi.setSystemTime(Date.now() + 61_000);
+        modal.requestUpdate();
+        await modal.updateComplete;
+        vi.advanceTimersByTime(1);
+        await modal.updateComplete;
+        expect(keys(modal)).toEqual([red.key]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("clears the New timer when the store is removed while open", async () => {
+      const modal = await openNewTabExpiringSoon();
+      modal.requestUpdate();
+      await modal.updateComplete;
+      const armed = newEndTimer(modal);
+      expect(armed).not.toBeNull();
+      const clear = vi.spyOn(globalThis, "clearTimeout");
+      try {
+        modal.remove();
+        expect(clear).toHaveBeenCalledWith(armed);
+      } finally {
+        clear.mockRestore();
+      }
+      expect(newEndTimer(modal)).toBeNull();
+    });
+
+    it("leaves the Effects tab's selection alone when an effect stops being new", async () => {
+      const until = new Date(Date.now() + 60_000).toISOString();
+      resolvedCatalog = [red, withNew(trail("comet"), until), atom];
+      const { store: modal } = await openEffectsStore();
+      vi.useFakeTimers({ now: Date.now() });
+      try {
+        // Drop the real timer; the redraw re-arms it on the fake clock.
+        (modal as unknown as { clearNewEnd(): void }).clearNewEnd();
+        modal.requestUpdate();
+        await modal.updateComplete;
+        const select = vi.spyOn(
+          modal as unknown as { selectVisible(groups: unknown): void },
+          "selectVisible",
+        );
+        const cardsDone = () =>
+          Promise.all(
+            [...modal.querySelectorAll<CosmeticCard>("cosmetic-card")].map(
+              (c) => c.updateComplete,
+            ),
+          );
+        await cardsDone();
+        expect(modal.querySelector("[data-cosmetic-new]")).toBeTruthy();
+        vi.advanceTimersByTime(61_000);
+        await modal.updateComplete;
+        await cardsDone();
+        expect(modal.querySelector("[data-cosmetic-new]")).toBeNull();
+        expect(select).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("falls back to Skins when the latest fetch finds nothing new, even with an older one pending", async () => {
+      const modal = await openStoreOnCosmetic("patterns");
+      modal.close();
+      // A sale-end refetch from before still hangs…
+      vi.mocked(fetchCosmetics).mockReturnValueOnce(new Promise(() => {}));
+      void (
+        modal as unknown as { loadCatalog(): Promise<unknown> }
+      ).loadCatalog();
+      // …and the reopen's own fetch finds nothing new.
+      vi.mocked(refreshStaleCosmetics).mockReturnValueOnce(true);
+      vi.mocked(fetchCosmetics).mockResolvedValueOnce({} as Cosmetics);
+      modal.open({ tab: "cosmetics", sub: "new" });
+      await vi.waitFor(() =>
+        expect(
+          modal
+            .querySelector("[data-store-subtab].border-malibu-blue")
+            ?.getAttribute("data-store-subtab"),
+        ).toBe("patterns"),
+      );
+      await vi.waitFor(() => expect(keys(modal)[0]).toBe(red.key));
+    });
+
+    it("keeps sub=new while a stale catalog refreshes", async () => {
+      // The cached catalog has nothing new; the refreshed one does.
+      const cached = {} as Cosmetics;
+      const refreshed = {} as Cosmetics;
+      const newFlag = withNew(flag, soon());
+      vi.mocked(resolveCosmetics).mockImplementation((cosmetics) =>
+        cosmetics === refreshed ? [red, newFlag] : [red],
+      );
+      vi.mocked(fetchCosmetics).mockResolvedValueOnce(cached);
+      const modal = await openStoreOnCosmetic("patterns");
+      modal.close();
+
+      vi.mocked(refreshStaleCosmetics).mockReturnValueOnce(true);
+      let deliver!: (catalog: Cosmetics) => void;
+      vi.mocked(fetchCosmetics).mockReturnValueOnce(
+        new Promise((resolve) => (deliver = resolve)),
+      );
+      modal.open({ tab: "cosmetics", sub: "new" });
+      await modal.updateComplete;
+      // While it waits, the bar still shows New as the selected tab, and the
+      // empty grid says nothing is new rather than "No skins".
+      expect(
+        modal
+          .querySelector("[data-store-subtab].border-malibu-blue")
+          ?.getAttribute("data-store-subtab"),
+      ).toBe("new");
+      expect(modal.textContent).toContain("store.no_new_items");
+      expect(modal.textContent).not.toContain("store.no_skins");
+      deliver(refreshed);
+      await vi.waitFor(() => expect(keys(modal)).toEqual([newFlag.key]));
+    });
+
+    it("keeps its New timer, and its resolved catalog, across redraws", async () => {
+      const modal = await openNewTabExpiringSoon();
+      modal.requestUpdate();
+      await modal.updateComplete;
+      const armed = newEndTimer(modal);
+      expect(armed).not.toBeNull();
+      vi.mocked(resolveCosmetics).mockClear();
+      modal.requestUpdate();
+      await modal.updateComplete;
+      modal.requestUpdate();
+      await modal.updateComplete;
+      expect(newEndTimer(modal)).toBe(armed);
+      expect(resolveCosmetics).not.toHaveBeenCalled();
+    });
+  });
+
   it("tells a store-wide sale from one on selected items", () => {
     const promotion = { id: "s", name: "Sale", percentOff: 20, endsAt: "" };
     const catalog = (secondOnSale: boolean) =>
@@ -934,6 +1324,7 @@ describe("StoreModal cosmetic browser", () => {
         blue,
         "hard",
         expect.objectContaining({ kind: "tab", tab: "cosmetics" }),
+        240,
       ),
     );
     expect(localStorage.getItem(PATTERN_KEY)).toBeNull();
@@ -953,7 +1344,12 @@ describe("StoreModal cosmetic browser", () => {
     await clickHardPurchase(modal);
 
     await vi.waitFor(() =>
-      expect(purchaseCosmetic).toHaveBeenCalledWith(blue, "hard", undefined),
+      expect(purchaseCosmetic).toHaveBeenCalledWith(
+        blue,
+        "hard",
+        undefined,
+        240,
+      ),
     );
   });
 
@@ -975,6 +1371,7 @@ describe("StoreModal cosmetic browser", () => {
         red,
         "hard",
         expect.any(Object),
+        120,
       ),
     );
     expect(
@@ -1054,6 +1451,50 @@ describe("StoreModal cosmetic browser", () => {
     expect(card(modal, flag.key)?.state).toBe("focused");
   });
 
+  it("hides the Card sub-tab when only held-back taunts and titles are sold", async () => {
+    const item = { product: null, rarity: "rare" };
+    const heldBackOnly = {
+      patterns: {},
+      flags: {},
+      cardTitles: {
+        veteran: { ...item, name: "veteran", text: "Veteran", priceSoft: 500 },
+      },
+      taunts: {
+        salute: {
+          ...item,
+          name: "salute",
+          tauntKind: "icon",
+          preset: "salute",
+          priceSoft: 800,
+        },
+      },
+    };
+    vi.mocked(fetchCosmetics).mockResolvedValue(
+      heldBackOnly as unknown as Cosmetics,
+    );
+    const modal = await openStoreOnCosmetic("patterns");
+    expect(modal.querySelector("[data-store-subtab='card']")).toBeNull();
+
+    store?.remove();
+    vi.mocked(fetchCosmetics).mockResolvedValue({
+      ...heldBackOnly,
+      cardBackgrounds: {
+        bg_frontline: {
+          ...item,
+          name: "bg_frontline",
+          url: "/bg.webp",
+          priceHard: 240,
+        },
+      },
+    } as unknown as Cosmetics);
+    const withBackground = await openStoreOnCosmetic("patterns");
+    await vi.waitFor(() =>
+      expect(
+        withBackground.querySelector("[data-store-subtab='card']"),
+      ).not.toBeNull(),
+    );
+  });
+
   it("styles cosmetic sub-tabs like the modal's own tab bar", async () => {
     const modal = await openStoreOnCosmetic("patterns");
     const subTab = [
@@ -1117,6 +1558,7 @@ describe("StoreModal cosmetic browser", () => {
       hydro,
       "hard",
       expect.any(Object),
+      90,
     );
     expect(localStorage.getItem(EFFECTS_KEY)).toBeNull();
   });
@@ -1299,6 +1741,7 @@ describe("StoreModal cosmetic browser", () => {
       pack,
       "dollar",
       expect.any(Object),
+      undefined,
     );
   });
 
@@ -1360,6 +1803,7 @@ describe("StoreModal cosmetic browser", () => {
       steamPlus,
       "dollar",
       expect.any(Object),
+      undefined,
     );
   });
 
@@ -1428,6 +1872,7 @@ describe("StoreModal cosmetic browser", () => {
       platinumSubscription,
       "dollar",
       expect.any(Object),
+      undefined,
     );
   });
 
@@ -1473,6 +1918,7 @@ describe("StoreModal cosmetic browser", () => {
       { ...goldSubscription, relationship: "purchasable" },
       "dollar",
       expect.any(Object),
+      undefined,
     );
   });
 
@@ -1497,6 +1943,7 @@ describe("StoreModal cosmetic browser", () => {
       starterBundle,
       "hard",
       expect.any(Object),
+      250,
     );
   });
 
@@ -1547,6 +1994,7 @@ describe("StoreModal cosmetic browser", () => {
         starterBundle,
         "hard",
         expect.any(Object),
+        250,
       ),
     );
 
@@ -1628,6 +2076,7 @@ describe("StoreModal cosmetic browser", () => {
       affiliatePattern,
       "hard",
       expect.any(Object),
+      120,
     );
   });
 });
@@ -1812,6 +2261,7 @@ describe("StoreModal on the Play rail", () => {
       playPack,
       "dollar",
       expect.any(Object),
+      undefined,
     );
 
     // The catalog's dollar price shows nowhere, on the card or in its preview.
@@ -2199,5 +2649,297 @@ describe("store analytics", () => {
     await vi.waitFor(() =>
       expect(FakeIO.instances.some((io) => io.observed.has(el))).toBe(true),
     );
+  });
+  // Store experiments: a refetched catalog (the player's group landed late,
+  // or a purchase met a changed price) re-renders the open store, and the
+  // flash card gets an exposure watcher of its own, so analytics never count
+  // the card twice in one page view.
+  it("re-renders on a refetched catalog without counting the flash card twice", async () => {
+    resetExperimentsForTest();
+    const endsAt = new Date(Date.now() + 3_600_000).toISOString();
+    const flashSale = {
+      id: "40",
+      name: "Hot sale",
+      percentOff: 35,
+      endsAt,
+      kind: "flash" as const,
+    };
+    const plain = {
+      patterns: {},
+      flags: {},
+      promotions: [flashSale],
+    } as unknown as Cosmetics;
+    vi.mocked(fetchCosmetics).mockResolvedValue(plain);
+    const zap: ResolvedCosmetic = {
+      ...red,
+      cosmetic: {
+        ...pattern,
+        name: "zap",
+        priceHard: 52,
+        listPriceHard: 80,
+        promotion: flashSale,
+      } as never,
+      key: "pattern:zap:red",
+    };
+    resolvedCatalog = [red, zap];
+    store = document.createElement("store-modal") as StoreModal;
+    store.inline = true;
+    document.body.appendChild(store);
+    await store.updateComplete;
+    store.open({ tab: "cosmetics", sub: "sale" });
+    const modal = store;
+    await vi.waitFor(() =>
+      expect(modal.querySelector("[data-store-flash]")).toBeTruthy(),
+    );
+    const hero = modal.querySelector("[data-store-flash]")!;
+    // Watched by the tracker (its card) and by the exposure watcher (the hero).
+    await vi.waitFor(() =>
+      expect(FakeIO.instances.some((io) => io.observed.has(hero))).toBe(true),
+    );
+    const heroCard = hero.querySelector("[data-store-product]")!;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    setVisible(heroCard, true);
+    vi.advanceTimersByTime(1000);
+
+    // The Deeper group's catalog lands.
+    const deeper = {
+      ...plain,
+      promotions: [{ ...flashSale, percentOff: 45 }],
+    } as unknown as Cosmetics;
+    vi.mocked(fetchCosmetics).mockResolvedValue(deeper);
+    vi.mocked(resolveCosmetics).mockClear();
+    publishExperimentsForTest(
+      [
+        {
+          key: "daily_deal_depth_1",
+          surface: "flash_sale_depth",
+          variant: "deeper",
+          counted: true,
+        },
+      ],
+      "daily_deal_depth_1.deeper",
+    );
+    document.dispatchEvent(
+      new CustomEvent(COSMETICS_CHANGED, { detail: deeper }),
+    );
+    await vi.waitFor(() =>
+      expect(vi.mocked(resolveCosmetics).mock.calls[0]?.[0]).toBe(deeper),
+    );
+    await modal.updateComplete;
+    expect(modal.querySelector("[data-store-flash]")!.textContent).toContain(
+      "store.flash_sale_hero_title",
+    );
+
+    // Seen again after the re-render: still one impression this page view.
+    setVisible(heroCard, false);
+    setVisible(heroCard, true);
+    vi.advanceTimersByTime(1000);
+    modal.close();
+    expect(
+      sent().filter(
+        (e: { type: string; item: string }) =>
+          e.type === "impression" && e.item === "pattern:zap",
+      ),
+    ).toHaveLength(1);
+    resetExperimentsForTest();
+  });
+
+  it("stops watching the flash card for an exposure when the store closes", async () => {
+    resetExperimentsForTest();
+    const flashSale = {
+      id: "40",
+      name: "Hot sale",
+      percentOff: 35,
+      endsAt: new Date(Date.now() + 3_600_000).toISOString(),
+      kind: "flash" as const,
+    };
+    vi.mocked(fetchCosmetics).mockResolvedValue({
+      patterns: {},
+      flags: {},
+      promotions: [flashSale],
+    } as unknown as Cosmetics);
+    resolvedCatalog = [
+      red,
+      {
+        ...red,
+        cosmetic: {
+          ...pattern,
+          name: "zap",
+          priceHard: 52,
+          listPriceHard: 80,
+          promotion: flashSale,
+        } as never,
+        key: "pattern:zap:red",
+      },
+    ];
+    store = document.createElement("store-modal") as StoreModal;
+    store.inline = true;
+    document.body.appendChild(store);
+    await store.updateComplete;
+    const modal = store;
+    const watched = () => {
+      const hero = modal.querySelector("[data-store-flash]");
+      return (
+        hero !== null && FakeIO.instances.some((io) => io.observed.has(hero))
+      );
+    };
+    modal.open({ tab: "cosmetics", sub: "sale" });
+    await vi.waitFor(() => expect(watched()).toBe(true));
+
+    // Hidden, not removed: the clock stops at once, not when the observer
+    // gets round to reporting it.
+    modal.close();
+    await modal.updateComplete;
+    expect(modal.querySelector("[data-store-flash]")).toBeTruthy();
+    expect(watched()).toBe(false);
+
+    // Reopened: watched again, from a fresh interval.
+    modal.open({ tab: "cosmetics", sub: "sale" });
+    await vi.waitFor(() => expect(watched()).toBe(true));
+    resetExperimentsForTest();
+  });
+
+  // Featured leads with the deal hero (data-featured-section="deal"), the
+  // same flash card the On sale tab shows: it is watched for an exposure too.
+  it("watches the Featured deal hero for an exposure", async () => {
+    resetExperimentsForTest();
+    const flashSale = {
+      id: "40",
+      name: "Hot sale",
+      percentOff: 35,
+      endsAt: new Date(Date.now() + 3_600_000).toISOString(),
+      kind: "flash" as const,
+    };
+    vi.mocked(fetchCosmetics).mockResolvedValue({
+      patterns: {},
+      flags: {},
+      promotions: [flashSale],
+    } as unknown as Cosmetics);
+    resolvedCatalog = [
+      red,
+      {
+        ...red,
+        cosmetic: {
+          ...pattern,
+          name: "zap",
+          priceHard: 52,
+          listPriceHard: 80,
+          promotion: flashSale,
+        } as never,
+        key: "pattern:zap:red",
+      },
+    ];
+    store = document.createElement("store-modal") as StoreModal;
+    store.inline = true;
+    document.body.appendChild(store);
+    await store.updateComplete;
+    const modal = store;
+    modal.open();
+    await vi.waitFor(() => {
+      const hero = modal.querySelector('[data-featured-section="deal"]');
+      expect(hero).toBeTruthy();
+      expect(FakeIO.instances.some((io) => io.observed.has(hero!))).toBe(true);
+    });
+    resetExperimentsForTest();
+  });
+
+  it("moves an open bundle dialog onto a refetched catalog's price", async () => {
+    resolvedCatalog = [starterBundle];
+    const modal = await openStoreOnTab("bundles");
+    card(modal, starterBundle.key)!.onActivate!(starterBundle);
+    await modal.updateComplete;
+    const dialogButton = async () => {
+      const host = modal.querySelector(
+        "pack-contents-dialog",
+      ) as LitElement | null;
+      await host?.updateComplete;
+      return document.body.querySelector(
+        "[data-pack-contents-action] purchase-button",
+      ) as PurchaseButton | null;
+    };
+    expect((await dialogButton())!.priceHard).toBe(250);
+
+    // A purchase met a changed price; the catalog is refetched at 300.
+    const repriced: ResolvedCosmetic = {
+      ...starterBundle,
+      cosmetic: { ...(starterBundle.cosmetic as object), priceHard: 300 },
+    } as ResolvedCosmetic;
+    resolvedCatalog = [repriced];
+    vi.mocked(fetchCosmetics).mockResolvedValue({} as Cosmetics);
+    document.dispatchEvent(new CustomEvent(COSMETICS_CHANGED, { detail: {} }));
+    await vi.waitFor(async () =>
+      expect((await dialogButton())?.priceHard).toBe(300),
+    );
+
+    // Gone from the catalog: the dialog closes rather than sell it.
+    resolvedCatalog = [];
+    vi.mocked(fetchCosmetics).mockResolvedValue({} as Cosmetics);
+    document.dispatchEvent(new CustomEvent(COSMETICS_CHANGED, { detail: {} }));
+    await vi.waitFor(() =>
+      expect(document.body.querySelector("[data-pack-contents]")).toBeNull(),
+    );
+  });
+});
+
+// A Store link to a card item opens the Card sub-tab and hands the item to
+// its grid, which selects it; once shown, the Store stops asking.
+describe("StoreModal: a link to a card item", () => {
+  beforeEach(() => {
+    resolvedCatalog = [red, blue, green, flag, wake, atom, hydro, hydroAlt];
+    vi.mocked(fetchCosmetics).mockReset();
+    vi.mocked(fetchCosmetics).mockResolvedValue({} as Cosmetics);
+    vi.mocked(resolveCosmetics).mockReset();
+    vi.mocked(resolveCosmetics).mockImplementation(() => resolvedCatalog);
+  });
+  afterEach(() => {
+    store?.remove();
+    store = undefined;
+  });
+
+  it("passes the item to the card grid, and stops asking once it's shown", async () => {
+    store = document.createElement("store-modal") as StoreModal;
+    store.inline = true;
+    document.body.appendChild(store);
+    await store.updateComplete;
+    store.open({ tab: "cosmetics", item: "cardBackground:bg_storm_front" });
+    await vi.waitFor(() =>
+      expect(store!.querySelector("card-store-grid")).toBeTruthy(),
+    );
+    const grid = store.querySelector("card-store-grid") as unknown as {
+      requestedItem: string | null;
+    } & HTMLElement;
+    expect(grid.requestedItem).toBe("cardBackground:bg_storm_front");
+    grid.dispatchEvent(
+      new CustomEvent("requested-item-shown", { bubbles: true }),
+    );
+    expect(
+      (store as unknown as { requestedItem: string | null }).requestedItem,
+    ).toBeNull();
+  });
+
+  it("closing the Store closes a card preview left open", async () => {
+    // The Store hides without disconnecting its grid, so a preview left
+    // open would keep its Tab trap (and show again on the next open).
+    store = document.createElement("store-modal") as StoreModal;
+    store.inline = true;
+    document.body.appendChild(store);
+    await store.updateComplete;
+    store.open({ tab: "cosmetics", item: "cardBackground:bg_storm_front" });
+    await vi.waitFor(() =>
+      expect(store!.querySelector("card-store-grid")).toBeTruthy(),
+    );
+    const grid = store.querySelector("card-store-grid") as unknown as {
+      previewing: unknown;
+      updateComplete: Promise<unknown>;
+    };
+    grid.previewing = {
+      type: "cardBackground",
+      item: { name: "bg_storm_front", rarity: "common" },
+    };
+    await grid.updateComplete;
+    store.close();
+    await grid.updateComplete;
+    expect(grid.previewing).toBeNull();
+    expect(store.querySelector("card-item-preview")).toBeNull();
   });
 });

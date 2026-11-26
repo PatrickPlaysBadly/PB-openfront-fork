@@ -13,6 +13,7 @@ import {
   PatternDataSchema,
 } from "./CosmeticSchemas";
 import type { GameEvent } from "./EventBus";
+import { PlayerCardSchema } from "./PlayerCardSchemas";
 
 import {
   AllPlayersStatsSchema,
@@ -228,13 +229,28 @@ export const ClientInfoSchema = z.object({
   // from themselves: their own client draws its own badge from its local
   // /users/@me instead), when the API has progression off or the lookup
   // failed, and on anonymized entries (a badge beside an anonymous name would
-  // point out the veterans). Must stay the LAST field: its one presence
-  // bit is the eighth and last bit of this object's one-byte header, so an
-  // entry without it encodes byte-identically to one from before it existed,
-  // and a pre-badge frame still decodes. Another field here would need a
-  // second header byte. No range check here on purpose: one bad value must
-  // not fail the whole roster's parse, so unpackLevelBadge drops it instead.
+  // point out the veterans). Its presence bit is the eighth and last bit of
+  // the header's FIRST byte. No range check here on purpose: one bad value
+  // must not fail the whole roster's parse, so unpackLevelBadge drops it
+  // instead.
   levelBadge: zb.uint().optional(),
+  // The equipped player card background's cosmetic NAME (a key of the
+  // catalogue's cardBackgrounds); the client resolves the image from its own
+  // catalogue and shows it, still, behind the lobby name tag. Stamped by the
+  // game server from the card it resolved at join (resolveCard, from the same
+  // /users/@me lookup as levelBadge), never taken from the client: only for a
+  // player who owns the card AND that background. Display-only. Absent for
+  // guests, players without the card or a background, when the catalogue was
+  // unavailable at join, and on anonymized entries (the background would
+  // identify the player behind the anonymous name).
+  //
+  // Header layout: levelBadge filled the one-byte presence header, so this
+  // field's presence bit is bit 0 of a SECOND header byte, and every entry
+  // now costs two header bytes. Every peer runs the same build (no version
+  // byte; packages/zbin/README.md), so old frames need not decode. Append any
+  // further optional field after this one; tests/zbin/golden.test.ts pins
+  // the layout.
+  cardBackground: z.string().optional(),
 });
 
 export const GameInfoSchema = z.object({
@@ -261,6 +277,9 @@ export const GameInfoSchema = z.object({
   // Listed lobbies only: the host paid to put it in the public Special
   // queue, so the queue's countdown starts it.
   queued: z.boolean().optional(),
+  // Scheduled public lobbies only: the client who paid to boost the lobby to
+  // the front of its queue.
+  boostedBy: z.string().optional(),
 });
 
 // Browser-facing lobby info. Master/worker-internal fields (the creator hash
@@ -285,6 +304,8 @@ export const PublicGameInfoSchema = z.object({
   // than one the server scheduled, so the browser can label it Custom.
   // Featured lobbies are official events and never carry it.
   custom: z.boolean().optional(),
+  // A scheduled lobby a player paid to boost to the front of its queue.
+  boosted: z.boolean().optional(),
 });
 
 export const PublicGamesSchema = z.object({
@@ -361,6 +382,9 @@ export interface ClientInfo {
   // Server-stamped level for the name badge, packed (packLevelBadge); read it
   // with unpackLevelBadge. Display-only; never set on anonymized entries.
   levelBadge?: number;
+  // Server-stamped equipped card background (cosmetic name). Display-only;
+  // never set on anonymized entries.
+  cardBackground?: string;
 }
 
 export enum LogSeverity {
@@ -468,6 +492,10 @@ export const WirePlayerSchema = z.object({
   clanTag,
   cosmetics: PlayerCosmeticsSchema.optional(),
   ...playerRest,
+  // The player's card, for card owners only, as this viewer may see it (left
+  // off where the player's name is hidden from the viewer). Last, so a frame
+  // or record from before it decodes unchanged.
+  card: PlayerCardSchema.optional(),
 });
 
 export const WireGameStartInfoSchema = GameStartInfoSchema.extend({

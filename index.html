@@ -38,12 +38,24 @@
         transition: opacity 0.5s ease-out;
       }
 
-      /* iOS safe area support */
-      body {
+      /* iOS safe area support. Playwire's site stylesheet
+         (config.playwire.com/.../styles.css, loaded by ramp.js after this)
+         sets body { padding-bottom: 105px !important }, which leaves a blank
+         band under the footer whenever ads load. Both rules being
+         !important, the later stylesheet would win at equal specificity, so
+         this one uses html body to win regardless of load order. */
+      html body {
         padding-top: env(safe-area-inset-top);
         padding-right: env(safe-area-inset-right);
-        padding-bottom: env(safe-area-inset-bottom);
+        padding-bottom: env(safe-area-inset-bottom) !important;
         padding-left: env(safe-area-inset-left);
+      }
+      /* The bottom rail (position: fixed, a direct body child, inline
+         max-height: 100px) loads on lobby join, while the footer is still
+         shown under the lobby modal: reserve its height only while it's on
+         the page so it can't cover the footer links. */
+      html body:has(> #pw-oop-bottom_rail) {
+        padding-bottom: calc(100px + env(safe-area-inset-bottom)) !important;
       }
 
       /* Prevent Playwire bottom rail from affecting flex layout,
@@ -428,7 +440,7 @@
 
       <div
         id="turnstile-container"
-        class="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-99999"
+        class="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-99999 pointer-events-none data-[interactive=true]:top-0 data-[interactive=true]:left-0 data-[interactive=true]:translate-x-0 data-[interactive=true]:translate-y-0 data-[interactive=true]:w-full data-[interactive=true]:h-full data-[interactive=true]:flex data-[interactive=true]:items-center data-[interactive=true]:justify-center data-[interactive=true]:bg-black/50"
       ></div>
 
       <homepage-promos></homepage-promos>
@@ -549,7 +561,7 @@
     <!-- Bottom HUD: <sm=column, sm..lg=2col (HUD left | events right; flipped on
          landscape phones so the events are on the left), lg+=3col grid centered -->
     <div
-      class="fixed bottom-0 left-0 w-full z-[200] flex flex-col pointer-events-none sm:flex-row sm:max-lg:landscape:flex-row-reverse sm:items-end lg:grid lg:grid-cols-[1fr_auto_1fr] lg:items-end min-[1200px]:px-4"
+      class="[body:not(.in-game)_&]:hidden! fixed bottom-0 left-0 w-full z-[200] flex flex-col pointer-events-none sm:flex-row sm:max-lg:landscape:flex-row-reverse sm:items-end lg:grid lg:grid-cols-[1fr_auto_1fr] lg:items-end min-[1200px]:px-4"
       style="
         padding-bottom: env(safe-area-inset-bottom);
         padding-left: env(safe-area-inset-left);
@@ -561,27 +573,30 @@
         class="contents sm:flex sm:flex-col sm:pointer-events-none w-full sm:w-[500px] lg:w-fit lg:min-w-[500px] lg:col-start-2 sm:z-10"
       >
         <attacks-display
-          class="w-full lg:w-0 lg:min-w-full pointer-events-auto order-1 sm:order-none"
+          class="w-full lg:w-0 lg:min-w-full pointer-events-auto order-1 sm:order-none max-sm:side-bar:pe-8"
         ></attacks-display>
         <!-- Above the control panel's stacking context: in portrait below lg
              the unit bar inside it is fixed to the right edge and would
              otherwise cover the panel's close button on phones. -->
         <tutorial-panel
-          class="hidden w-full lg:w-0 lg:min-w-full order-3 sm:order-none z-20"
+          class="hidden w-full lg:w-0 lg:min-w-full order-3 sm:order-none z-20 max-sm:side-bar:pe-8"
         ></tutorial-panel>
         <!-- The unit bar is a row below the control panel from lg up, a row
              above it on landscape phones, and a column fixed to the right edge
              below lg in portrait (side-bar). The blur is off there: a
              backdrop-filter would pin the fixed bar to this panel instead of
-             the screen.
+             the screen. The control panel blurs itself instead, as the bar
+             is not inside it.
              The panel runs on into the safe-area insets around it (home
              indicator, notch) so its content reaches the screen edge. Only on
              the edges it touches: left below lg (right instead on landscape
              phones), right below sm, the bottom until it floats from 1200px. -->
         <div
-          class="flex flex-col pointer-events-auto bg-gray-800/92 backdrop-blur-sm side-bar:backdrop-blur-none sm:rounded-tr-lg sm:max-lg:landscape:rounded-tr-none sm:max-lg:landscape:rounded-tl-lg lg:rounded-t-lg min-[1200px]:rounded-lg shadow-lg order-3 sm:order-none z-10 max-[1200px]:-mb-[env(safe-area-inset-bottom)] max-lg:-ml-[env(safe-area-inset-left)] sm:max-lg:landscape:ml-0 max-sm:-mr-[env(safe-area-inset-right)] sm:max-lg:landscape:-mr-[env(safe-area-inset-right)]"
+          class="flex flex-col pointer-events-auto hud-panel side-bar:backdrop-blur-none sm:rounded-tr-lg sm:max-lg:landscape:rounded-tr-none sm:max-lg:landscape:rounded-tl-lg lg:rounded-t-lg min-[1200px]:rounded-lg order-3 sm:order-none z-10 max-[1200px]:-mb-[env(safe-area-inset-bottom)] max-lg:-ml-[env(safe-area-inset-left)] sm:max-lg:landscape:ml-0 max-sm:-mr-[env(safe-area-inset-right)] sm:max-lg:landscape:-mr-[env(safe-area-inset-right)]"
         >
-          <control-panel class="w-full"></control-panel>
+          <control-panel
+            class="w-full side-bar:rounded-[inherit] side-bar:backdrop-blur-hud"
+          ></control-panel>
           <unit-display
             class="block w-full max-lg:landscape:order-first side-bar:w-auto side-bar:fixed side-bar:top-1/2 side-bar:-translate-y-1/2 side-bar:right-[env(safe-area-inset-right)]"
           ></unit-display>
@@ -631,7 +646,7 @@
          sidebar: the card is centered when it fits and shifts right or narrows
          to clear the open leaderboard instead of covering it. -->
     <div
-      class="contents lg:fixed lg:top-0 lg:inset-x-0 lg:z-1000 lg:grid lg:grid-cols-[minmax(max-content,1fr)_minmax(0,max-content)_minmax(max-content,1fr)] lg:items-start lg:pointer-events-none"
+      class="[body:not(.in-game)_&]:hidden! contents lg:fixed lg:top-0 lg:inset-x-0 lg:z-1000 lg:grid lg:grid-cols-[minmax(max-content,1fr)_minmax(0,max-content)_minmax(max-content,1fr)] lg:items-start lg:pointer-events-none"
     >
       <game-left-sidebar
         class="lg:col-start-1 lg:justify-self-start"

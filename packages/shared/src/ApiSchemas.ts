@@ -16,6 +16,7 @@ import {
   LEVEL_BADGE_MAX_LEVEL,
   LEVEL_BADGE_MAX_PRESTIGE,
 } from "./LevelBadgeWire";
+import { UserMeCardSchema } from "./PlayerCardSchemas";
 
 const RequiredClanTagSchema = ClanTagSchema.unwrap();
 
@@ -58,6 +59,31 @@ export type TokenPayload = z.infer<typeof TokenPayloadSchema>;
 export const ADMIN_ROLES = ["admin", "root"] as const;
 export function isAdminRole(role: string | null | undefined): boolean {
   return role === "admin" || role === "root";
+}
+
+/**
+ * A join is Steam-authenticated when its verified JWT carries provider="steam"
+ * (set by infra only after verifySteamTicket()). Never key this off the
+ * client-supplied instanceId — that is forgeable.
+ */
+export function isSteamAuthenticated(claims: TokenPayload | null): boolean {
+  return claims?.provider === "steam";
+}
+
+export type ClientAuth = "account" | "anonymous";
+
+/**
+ * A guest session carries a JWT too, so a non-null claims object is not a
+ * sign-in. Infra stamps provider only for a session with a persistent identity
+ * behind it (discord, google, steam, email, a portal account...), except for
+ * "guest", which a refreshed guest session carries; a freshly minted guest
+ * session has no provider at all.
+ */
+export function clientAuth(claims: TokenPayload | null): ClientAuth {
+  const provider = claims?.provider;
+  return provider === undefined || provider === "guest"
+    ? "anonymous"
+    : "account";
 }
 
 export const DiscordUserSchema = z.object({
@@ -602,6 +628,8 @@ export const UserMeResponseSchema = z.object({
   user: z.object({
     discord: DiscordUserSchema.optional(),
     google: GoogleUserSchema.optional(),
+    // Sign in with Apple. The email may be Apple's private relay address.
+    apple: z.object({ email: z.string().optional() }).optional(),
     email: z.string().optional(),
     steam: SteamUserSchema.optional(),
   }),
@@ -721,6 +749,13 @@ export const UserMeResponseSchema = z.object({
     // reads as absent: drift in this cosmetic field must never fail the whole
     // /users/@me parse, which would make the player look signed out.
     progress: ProgressSchema.optional().catch(undefined),
+    // The player card loadout. Null without the card; a malformed one reads
+    // as absent (the game server parses this at join, so it must never fail
+    // the whole parse).
+    card: UserMeCardSchema.nullable().optional().catch(undefined),
+    // "Mute taunts": turns off every card taunt for this player. Fails closed:
+    // a malformed value reads as muted. (Taunts are held back; schema only.)
+    tauntsMuted: z.boolean().optional().catch(true),
     // "Hide my level": true when the player opted out of showing their level
     // to others. They still earn XP and see their own level; the game server
     // then leaves the badge off their lobby roster entry. Optional so an older
@@ -1439,8 +1474,25 @@ export type FfaRankLeaderboardResponse = z.infer<
   typeof FfaRankLeaderboardResponseSchema
 >;
 
+// Globally ordered top-250 FFA view (five pages of fifty).
+export const FfaAllRanksLeaderboardResponseSchema = z.object({
+  players: RankedLeaderboardEntrySchema.array(),
+});
+export type FfaAllRanksLeaderboardResponse = z.infer<
+  typeof FfaAllRanksLeaderboardResponseSchema
+>;
+
 export const FfaRankPositionResponseSchema = z.object({
   position: z.number().int().nullable(),
+  // Global FFA position; null for unlisted players and for up to 15 minutes
+  // after a deploy, absent on an older API.
+  globalPosition: z
+    .number()
+    .int()
+    .positive()
+    .nullable()
+    .optional()
+    .catch(undefined),
 });
 
 export const FriendEntrySchema = z.object({
@@ -1684,12 +1736,38 @@ export const StorePlacementTabSchema = z.enum([
 ]);
 export type StorePlacementTab = z.infer<typeof StorePlacementTabSchema>;
 export const StorePlacementSubTabSchema = z.enum([
+  "new",
   "sale",
   "patterns",
   "flags",
   "crowns",
+  // Player card items.
+  "card",
 ]);
 export type StorePlacementSubTab = z.infer<typeof StorePlacementSubTabSchema>;
+// The Inventory's tabs: its In game categories, and its Player card tab.
+export const StorePlacementInventorySubTabSchema = z.enum([
+  "skins",
+  "flags",
+  "crowns",
+  "effects",
+  "card",
+]);
+export type StorePlacementInventorySubTab = z.infer<
+  typeof StorePlacementInventorySubTabSchema
+>;
+// The Featured tab's sections. Featured is a kind of its own, not a tab: the
+// section says which slot an item was seen or bought in. The client never
+// sends `{ kind: "tab", tab: "featured" }`. Mirrors the API's copy.
+export const StorePlacementFeaturedSectionSchema = z.enum([
+  "deal",
+  "starter",
+  "new",
+  "sale",
+]);
+export type StorePlacementFeaturedSection = z.infer<
+  typeof StorePlacementFeaturedSectionSchema
+>;
 
 export const StorePlacementSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -1700,6 +1778,17 @@ export const StorePlacementSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("flash") }),
   z.object({ kind: z.literal("affiliate") }),
   z.object({ kind: z.literal("post_game") }),
+  // "Get {name}'s look" on the eliminated-by screen.
+  z.object({ kind: z.literal("card_loadout") }),
+  // The Inventory's buy dialog.
+  z.object({
+    kind: z.literal("inventory"),
+    subTab: StorePlacementInventorySubTabSchema,
+  }),
+  z.object({
+    kind: z.literal("featured"),
+    section: StorePlacementFeaturedSectionSchema,
+  }),
 ]);
 export type StorePlacement = z.infer<typeof StorePlacementSchema>;
 
@@ -1718,3 +1807,49 @@ export const StoreEventsBodySchema = z.object({
     .max(50),
 });
 export type StoreEventsBody = z.infer<typeof StoreEventsBodySchema>;
+
+// Store experiments (infra lib/Experiments.ts). GET /users/@me/experiments:
+// the signed-in player's test groups, and the catalog cohort to fetch
+// cosmetics.json with (null: the plain catalog). Lenient on surfaces and
+// params, so a test on a surface this build doesn't know never fails the
+// parse: the client only acts on the surfaces it knows.
+export const ExperimentsResponseSchema = z.object({
+  assignments: z.array(
+    z.object({
+      key: z.string(),
+      surface: z.string(),
+      variant: z.string(),
+      counted: z.boolean(),
+      params: z.record(z.string(), z.unknown()).optional(),
+    }),
+  ),
+  catalogCohort: z.string().nullable(),
+});
+export type ExperimentsResponse = z.infer<typeof ExperimentsResponseSchema>;
+export type ExperimentAssignment = ExperimentsResponse["assignments"][number];
+
+// POST /users/@me/experiments/exposures: the player saw the tested thing, in
+// the variant the client rendered. Steam never sends one.
+export const ExperimentExposureSurfaceSchema = z.enum([
+  "store_flash",
+  "home_banner",
+]);
+export type ExperimentExposureSurface = z.infer<
+  typeof ExperimentExposureSurfaceSchema
+>;
+export const ExperimentExposureBodySchema = z.object({
+  platform: z.enum(["web", "crazygames"]),
+  exposures: z
+    .array(
+      z.object({
+        key: z.string(),
+        variant: z.string(),
+        surface: ExperimentExposureSurfaceSchema,
+      }),
+    )
+    .min(1)
+    .max(10),
+});
+export type ExperimentExposureBody = z.infer<
+  typeof ExperimentExposureBodySchema
+>;

@@ -29,23 +29,30 @@ const __dirname = path.dirname(__filename);
 
 const clientForksTests = [
   "tests/client/ApexNavigation.test.ts",
+  "tests/client/AppleSignIn.test.ts",
   "tests/client/Auth.desktopLogin.test.ts",
   "tests/client/Auth.steamOpenId.test.ts",
   "tests/client/ClientEnvStatic.test.ts",
   "tests/client/ClientGameRunnerMessages.test.ts",
   "tests/client/CosmeticPackPurchase.test.ts",
   "tests/client/CosmeticPurchaseDebt.test.ts",
+  "tests/client/CosmeticPurchaseInPlace.test.ts",
   "tests/client/CreatorCodePanel.test.ts",
   "tests/client/HashedEmail.test.ts",
   "tests/client/InlineCheckout.test.ts",
   "tests/client/MainInitialize.test.ts",
   "tests/client/Matchmaking.test.ts",
   "tests/client/Platform.test.ts",
+  // Mocks Utils (translateText) for <purchase-button>, which other client
+  // files load too: in a vmThreads worker it could get a PurchaseButton
+  // another file evaluated with the real translateText.
+  "tests/client/PurchaseButtonEndScreen.test.ts",
   "tests/client/ServerList.test.ts",
   "tests/client/ShareLinks.test.ts",
   "tests/client/TransportConnectionRefused.test.ts",
   "tests/client/TransportPoolRedirect.test.ts",
   "tests/client/TransportReconnect.test.ts",
+  "tests/client/TransportTurnstileFallback.test.ts",
   "tests/client/UsernameBareClaim.test.ts",
   "tests/client/UsernameClaimPrefill.test.ts",
   "tests/client/graphics/layers/WinModal.test.ts",

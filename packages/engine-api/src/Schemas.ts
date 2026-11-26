@@ -3,6 +3,7 @@ import quickChatData from "resources/QuickChat.json";
 import { z } from "zod";
 import {
   AllPlayers,
+  CustomGameMap,
   Difficulty,
   Duos,
   GameMapSize,
@@ -260,9 +261,12 @@ export const PoolConfigSchema = z
   });
 export type PoolConfig = z.infer<typeof PoolConfigSchema>;
 
+export const MAX_BOTS = 1000;
+
 export const GameConfigSchema = z.compile(
   z.object({
-    gameMap: z.enum(GameMapType),
+    // Custom goes last, so the stock maps keep their zbin enum indices.
+    gameMap: z.enum({ ...GameMapType, Custom: CustomGameMap }),
     difficulty: z.enum(Difficulty),
     donateGold: z.boolean(), // Configures donations to humans only
     donateTroops: z.boolean(), // Configures donations to humans only
@@ -295,7 +299,7 @@ export const GameConfigSchema = z.compile(
         select: (v) => (typeof v === "number" ? 0 : 1),
       },
     ),
-    bots: zb.uint({ max: 400 }),
+    bots: zb.uint({ max: MAX_BOTS }),
     infiniteGold: z.boolean(),
     infiniteTroops: z.boolean(),
     instantBuild: z.boolean(),
@@ -355,6 +359,9 @@ export const GameConfigSchema = z.compile(
 // player cap: nullable so the host can lift it (null clears, undefined leaves
 // it alone), and at least 2 so a lobby can't be capped down to the host alone.
 export const GameConfigPatchSchema = GameConfigSchema.partial().extend({
+  // Stock maps only: a Custom map's files come with a scenario start, which a
+  // lobby can't carry yet.
+  gameMap: z.enum(GameMapType).optional(),
   maxPlayers: zb.uint({ min: 2, max: 1000 }).nullable().optional(),
 });
 export type GameConfigPatch = z.infer<typeof GameConfigPatchSchema>;
@@ -641,6 +648,18 @@ export const TribeSchema = z
   .loose();
 export type Tribe = z.infer<typeof TribeSchema>;
 
+// A game started from a scenario bundle (docs/ScenarioEditor.md, "Starting a
+// game from a bundle"): which published version, the bundle hash every
+// client checks its download against, and the nation each player takes over.
+export const ScenarioStartSchema = z.object({
+  id: ID,
+  version: zb.uint(),
+  hash: z.string().regex(/^[0-9a-f]{64}$/),
+  // At most one per nation, and a scenario holds at most 400 (MAX_NATIONS).
+  assignments: z.array(z.object({ clientID: ID, nationID: ID })).max(400),
+});
+export type ScenarioStart = z.infer<typeof ScenarioStartSchema>;
+
 export const GameStartInfoSchema = z.object({
   gameID: ID,
   lobbyCreatedAt: zb.uint(),
@@ -653,6 +672,8 @@ export const GameStartInfoSchema = z.object({
   // zb.json: TribeSchema is `.loose()`, and a positional binary layout would
   // silently drop the passthrough keys that looseness exists to preserve.
   tribes: z.array(zb.json(TribeSchema)).max(100).optional(),
+  // Set only for a game that restores a scenario's snapshot.
+  scenario: ScenarioStartSchema.optional(),
 });
 
 export const WinnerSchema = z
